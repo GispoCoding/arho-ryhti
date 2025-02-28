@@ -28,6 +28,7 @@ hame_count: int = 18  # adjust me when adding tables
 codes_count: int = 22  # adjust me when adding tables
 matview_count: int = 0  # adjust me when adding views
 
+ENV_FILES = [".env", ".env.test"]
 
 USE_DOCKER = (
     "1"  # Use "" if you don't want pytest-docker to start and destroy the containers
@@ -38,9 +39,10 @@ LOCAL_TZ = ZoneInfo("Europe/Helsinki")
 
 @pytest.fixture(scope="session", autouse=True)
 def set_env():
-    dotenv_file = Path(__file__).parent.parent / ".env"
-    assert dotenv_file.exists()
-    load_dotenv(str(dotenv_file))
+    for env_file in ENV_FILES:
+        dotenv_file = Path(__file__).parent.parent / env_file
+        assert dotenv_file.exists()
+        load_dotenv(str(dotenv_file), override=True)
     db_manager.SCHEMA_FILES_PATH = str(Path(__file__).parent.parent)
 
 
@@ -75,6 +77,11 @@ def main_db_params_with_root_user():
         "password": os.environ.get("SU_USER_PW", ""),
         "port": os.environ.get("DB_INSTANCE_PORT", ""),
     }
+
+
+@pytest.fixture(scope="session")
+def docker_setup():
+    return [f"{' '.join(f'--env-file {f}' for f in ENV_FILES)} up -d"]
 
 
 @pytest.fixture(scope="session")
