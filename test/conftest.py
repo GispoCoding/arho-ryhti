@@ -13,7 +13,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.operations import ops
 from alembic.script import ScriptDirectory
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from geoalchemy2.shape import from_shape
 from shapely.geometry import MultiLineString, MultiPoint, shape
 from sqlalchemy.orm import Session, sessionmaker
@@ -28,8 +28,6 @@ hame_count: int = 18  # adjust me when adding tables
 codes_count: int = 22  # adjust me when adding tables
 matview_count: int = 0  # adjust me when adding views
 
-ENV_FILES = [".env", ".env.test"]
-
 USE_DOCKER = (
     "1"  # Use "" if you don't want pytest-docker to start and destroy the containers
 )
@@ -39,10 +37,13 @@ LOCAL_TZ = ZoneInfo("Europe/Helsinki")
 
 @pytest.fixture(scope="session", autouse=True)
 def set_env():
-    for env_file in ENV_FILES:
-        dotenv_file = Path(__file__).parent.parent / env_file
-        assert dotenv_file.exists()
-        load_dotenv(str(dotenv_file), override=True)
+    env_variables = {
+        **dotenv_values(".env"),
+        **dotenv_values(".env.test"),
+        **os.environ,
+    }
+    os.environ.update(env_variables)
+
     db_manager.SCHEMA_FILES_PATH = str(Path(__file__).parent.parent)
 
 
@@ -81,7 +82,7 @@ def main_db_params_with_root_user():
 
 @pytest.fixture(scope="session")
 def docker_setup():
-    return [f"{' '.join(f'--env-file {f}' for f in ENV_FILES)} up -d"]
+    return ["--env-file .env --env-file .env.test up -d"]
 
 
 @pytest.fixture(scope="session")
