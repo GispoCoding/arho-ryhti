@@ -13,7 +13,7 @@ import simplejson as json  # type: ignore
 from geoalchemy2 import Geometry
 from geoalchemy2.shape import to_shape
 from shapely import to_geojson
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Query, sessionmaker
 
 from database import base, models
@@ -711,7 +711,42 @@ class RyhtiClient:
                 "maximumValue": plan_object.height_max,
                 "unitOfMeasure": plan_object.height_unit,
             }
+
+        # RelatedPlanObjectKeys
+        related_plan_object_keys = self._get_related_plan_object_keys(plan_object)
+        if related_plan_object_keys:
+            plan_object_dict["relatedPlanObjectKeys"] = related_plan_object_keys
+
         return plan_object_dict
+
+    def _get_related_plan_object_keys(
+        self, plan_object: base.PlanObjectBase
+    ) -> List["uuid.UUID"]:
+        # TODO: there might be other use cases for related plan objects
+        related_plan_object_keys = []
+        if isinstance(plan_object, models.OtherArea) and any(
+            regulation.type_of_plan_regulation.value
+            in {
+                "sitovanTonttijaonMukainenTontti",
+                "ohjeellinenrakennusPaikka",
+                "rakennusala",
+                "rakennuspaikka",
+                "rakennusalaJolleSaaSijoittaaTalousrakennuksen",
+                "rakennusalaJolleSaaSijoittaaSaunan",
+                "korttelialueTaiKorttelialueenOsa",
+            }
+            for group in plan_object.plan_regulation_groups
+            for regulation in cast(models.PlanRegulationGroup, group).plan_regulations
+        ):
+            with self.Session(expire_on_commit=False) as session:
+                stmt = select(models.LandUseArea.id).where(
+                    models.LandUseArea.plan_id == plan_object.plan_id,
+                    models.LandUseArea.geom.ST_Contains(plan_object.geom),
+                )
+                containing_land_use_area_id = session.scalars(stmt).one_or_none()
+                if containing_land_use_area_id:
+                    related_plan_object_keys.append(containing_land_use_area_id)
+        return related_plan_object_keys
 
     def get_plan_object_dicts(self, plan_objects: List[base.PlanObjectBase]) -> List:
         """
