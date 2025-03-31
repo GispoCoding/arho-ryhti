@@ -794,7 +794,6 @@ def plan_instance(
         lifecycle_status=preparation_status_instance,
         organisation=organisation_instance,
         plan_type=plan_type_instance,
-        to_be_exported=True,
     )
     return temp_session_feature(instance)
 
@@ -840,7 +839,6 @@ def another_plan_instance(
         lifecycle_status=preparation_status_instance,
         organisation=organisation_instance,
         plan_type=plan_type_instance,
-        to_be_exported=True,
     )
     return temp_session_feature(instance)
 
