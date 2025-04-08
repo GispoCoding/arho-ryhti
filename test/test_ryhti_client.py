@@ -836,7 +836,7 @@ def test_upload_unchanged_plan_documents(
 
 
 def test_get_plan_matters(
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     desired_plan_matter_dict: dict,
 ):
@@ -844,10 +844,10 @@ def test_get_plan_matters(
     Check that correct JSON structure is generated for plan matter. This requires that
     the client has already fetched a permanent identifer for the plan.
     """
-    client_with_plan_with_permanent_identifier_and_document.plan_matter_dictionaries = (
-        client_with_plan_with_permanent_identifier_and_document.get_plan_matters()
+    client_with_plan_with_permanent_identifier_and_documents.plan_matter_dictionaries = (
+        client_with_plan_with_permanent_identifier_and_documents.get_plan_matters()
     )
-    plan_matter = client_with_plan_with_permanent_identifier_and_document.plan_matter_dictionaries[
+    plan_matter = client_with_plan_with_permanent_identifier_and_documents.plan_matter_dictionaries[
         plan_instance.id
     ]
     deepcompare(
@@ -872,7 +872,7 @@ def test_get_plan_matters(
 
 
 def test_validate_plan_matters(
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_validate_invalid: Callable,
 ):
@@ -880,7 +880,7 @@ def test_validate_plan_matters(
     Check that JSON is posted and response received
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document.validate_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents.validate_plan_matters()
     )
     for plan_id, response in responses.items():
         assert plan_id == plan_instance.id
@@ -895,7 +895,7 @@ def test_validate_plan_matters(
 
 def test_save_plan_matter_validation_responses(
     session: Session,
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_validate_invalid: Callable,
 ):
@@ -903,9 +903,9 @@ def test_save_plan_matter_validation_responses(
     Check that Ryhti X-Road validation error is saved to database.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document.validate_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents.validate_plan_matters()
     )
-    message = client_with_plan_with_permanent_identifier_and_document.save_plan_matter_validation_responses(
+    message = client_with_plan_with_permanent_identifier_and_documents.save_plan_matter_validation_responses(
         responses
     )
     session.refresh(plan_instance)
@@ -914,7 +914,7 @@ def test_save_plan_matter_validation_responses(
 
 
 def test_post_new_plan_matters(
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_post_new_plan_matter: Callable,
 ):
@@ -923,7 +923,7 @@ def test_post_new_plan_matters(
     exist in Ryhti yet.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document.post_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents.post_plan_matters()
     )
     for plan_id, response in responses.items():
         assert plan_id == plan_instance.id
@@ -933,7 +933,7 @@ def test_post_new_plan_matters(
 
 def test_save_new_plan_matter_post_responses(
     session: Session,
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_post_new_plan_matter: Callable,
 ):
@@ -941,9 +941,9 @@ def test_save_new_plan_matter_post_responses(
     Check that export time is saved to database.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document.post_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents.post_plan_matters()
     )
-    message = client_with_plan_with_permanent_identifier_and_document.save_plan_matter_post_responses(
+    message = client_with_plan_with_permanent_identifier_and_documents.save_plan_matter_post_responses(
         responses
     )
     session.refresh(plan_instance)
@@ -953,7 +953,7 @@ def test_save_new_plan_matter_post_responses(
 
 def test_update_existing_plan_matters(
     session: Session,
-    client_with_plan_with_permanent_identifier_and_document_in_proposal_phase: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents_in_proposal_phase: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_update_existing_plan_matter: Callable,
 ):
@@ -962,7 +962,7 @@ def test_update_existing_plan_matters(
     and a new plan matter phase must be posted.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document_in_proposal_phase.post_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents_in_proposal_phase.post_plan_matters()
     )
     for plan_id, response in responses.items():
         assert plan_id == plan_instance.id
@@ -972,7 +972,7 @@ def test_update_existing_plan_matters(
 
 def test_save_update_existing_matter_post_responses(
     session: Session,
-    client_with_plan_with_permanent_identifier_and_document_in_proposal_phase: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents_in_proposal_phase: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_update_existing_plan_matter: Callable,
 ):
@@ -980,9 +980,9 @@ def test_save_update_existing_matter_post_responses(
     Check that export time is saved to database.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document_in_proposal_phase.post_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents_in_proposal_phase.post_plan_matters()
     )
-    message = client_with_plan_with_permanent_identifier_and_document_in_proposal_phase.save_plan_matter_post_responses(
+    message = client_with_plan_with_permanent_identifier_and_documents_in_proposal_phase.save_plan_matter_post_responses(
         responses
     )
     session.refresh(plan_instance)
@@ -992,7 +992,7 @@ def test_save_update_existing_matter_post_responses(
 
 def test_update_existing_plan_matter_phase(
     session: Session,
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_update_existing_plan_matter: Callable,
 ):
@@ -1001,7 +1001,7 @@ def test_update_existing_plan_matter_phase(
     phase exist in Ryhti and the plan matter phase must be updated.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document.post_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents.post_plan_matters()
     )
     for plan_id, response in responses.items():
         assert plan_id == plan_instance.id
@@ -1011,7 +1011,7 @@ def test_update_existing_plan_matter_phase(
 
 def test_save_update_existing_matter_phase_post_responses(
     session: Session,
-    client_with_plan_with_permanent_identifier_and_document: RyhtiClient,
+    client_with_plan_with_permanent_identifier_and_documents: RyhtiClient,
     plan_instance: models.Plan,
     mock_xroad_ryhti_update_existing_plan_matter: Callable,
 ):
@@ -1019,9 +1019,9 @@ def test_save_update_existing_matter_phase_post_responses(
     Check that export time is saved to database.
     """
     responses = (
-        client_with_plan_with_permanent_identifier_and_document.post_plan_matters()
+        client_with_plan_with_permanent_identifier_and_documents.post_plan_matters()
     )
-    message = client_with_plan_with_permanent_identifier_and_document.save_plan_matter_post_responses(
+    message = client_with_plan_with_permanent_identifier_and_documents.save_plan_matter_post_responses(
         responses
     )
     session.refresh(plan_instance)
