@@ -1,12 +1,17 @@
+volumes:
+  postgis-data:
+
 services:
   db:
     image: postgis/postgis:13-master
     ports:
-      - "5434:5432"
+      - ${DB_INSTANCE_PORT:-5434}:5432
     environment:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_USER=postgres
       - POSTGRES_DB=postgres
+    volumes:
+      - postgis-data:/var/lib/postgresql/data
     command: ["postgres", "-c", "log_statement=all"]
 
   db_manager:
@@ -20,11 +25,13 @@ services:
       - DB_INSTANCE_PORT=5432
       - READ_FROM_AWS=0
     ports:
-      - "8081:8080"
+      - ${DB_MANAGER_PORT:-8081}:8080
     depends_on:
       - db
     volumes:
-      - ./lambdas/db_manager/db_manager.py:/var/task/app.py
+      - ./lambdas/db_manager/db_manager.py:/var/task/db_manager.py
+      - ./database:/var/task/database
+      - ./migrations:/var/task/migrations
 
   koodistot_loader:
     build:
@@ -37,11 +44,12 @@ services:
       - DB_INSTANCE_PORT=5432
       - READ_FROM_AWS=0
     ports:
-      - "8082:8080"
+      - ${KOODISTOT_LOADER_PORT:-8082}:8080
     depends_on:
       - db
     volumes:
-      - ./lambdas/koodistot_loader/koodistot_loader.py:/var/task/app.py
+      - ./lambdas/koodistot_loader/koodistot_loader.py:/var/task/koodistot_loader.py
+      - ./database:/var/task/database
 
   ryhti_client:
     build:
@@ -62,12 +70,13 @@ services:
       - XROAD_SYKE_CLIENT_ID=test-id
       - XROAD_SYKE_CLIENT_SECRET=test-secret
     ports:
-      - "8083:8080"
+      - ${RYHTI_CLIENT_PORT:-8083}:8080
     depends_on:
       - db
       - mock_xroad
     volumes:
-      - ./lambdas/ryhti_client/ryhti_client.py:/var/task/app.py
+      - ./lambdas/ryhti_client/ryhti_client.py:/var/task/ryhti_client.py
+      - ./database:/var/task/database
       - ./ryhti_debug:/var/task/ryhti_debug
 
   mml_loader:
@@ -82,16 +91,17 @@ services:
       - READ_FROM_AWS=0
       - MML_APIKEY
     ports:
-      - "8085:8080"
+      - ${MML_LOADER_PORT:-8085}:8080
     depends_on:
       - db
     volumes:
-      - ./lambdas/mml_loader/mml_loader.py:/var/task/app.py
+      - ./lambdas/mml_loader/mml_loader.py:/var/task/mml_loader.py
+      - ./database:/var/task/database
 
   mock_xroad:
       image: mockserver/mockserver:latest
       ports:
-        - 8443:1080
+        - ${MOCK_SERVER_PORT:-8443}:1080
       environment:
         - MOCKSERVER_WATCH_INITIALIZATION_JSON="true"
         - MOCKSERVER_PROPERTY_FILE=/config/mockserver.properties
