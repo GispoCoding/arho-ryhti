@@ -1,0 +1,18 @@
+volumes:
+  postgis-data:
+
+services:
+  db:
+    volumes: !reset []
+
+  db_manager:
+    volumes: !reset []
+
+  koodistot_loader:
+    volumes: !reset []
+
+  ryhti_client:
+    volumes: !reset []
+
+  mml_loader:
+    volumes: !reset []

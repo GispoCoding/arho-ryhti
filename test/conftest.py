@@ -89,9 +89,16 @@ def docker_setup():
 
 @pytest.fixture(scope="session")
 def docker_compose_file(pytestconfig):
-    compose_file = Path(__file__).parent.parent / "docker-compose.dev.yml"
-    assert compose_file.exists()
-    return str(compose_file)
+    compose_files = [Path(__file__).parent.parent / "docker-compose.dev.yml"]
+
+    # Use the docker-compose.ci.yml file in CI
+    if os.environ.get("CI", None) is not None:
+        print("Using docker-compose.ci-test.yml for CI tests")
+        compose_files.append(
+            Path(__file__).parent.parent / "docker-compose.ci-test.yml"
+        )
+
+    return [str(f) for f in compose_files]
 
 
 if os.environ.get("MANAGE_DOCKER", USE_DOCKER):
