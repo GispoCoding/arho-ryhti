@@ -16,7 +16,7 @@ from shapely import to_geojson
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Query, sessionmaker
 
-from database import base, models
+from database import base, codes, models
 from database.codes import (
     NameOfPlanCaseDecision,
     TypeOfDecisionMaker,
@@ -461,7 +461,7 @@ class RyhtiClient:
         ]
 
     def get_lifecycle_dates_for_status(
-        self, plan_base: base.PlanBase, status_value: str
+        self, plan_base: models.PlanBase, status_value: str
     ) -> List[models.LifeCycleDate]:
         """
         Returns the plan lifecycle date objects for the desired status.
@@ -473,7 +473,7 @@ class RyhtiClient:
         ]
 
     def get_lifecycle_periods(
-        self, plan_base: base.PlanBase, status_value: str, datetimes: bool = True
+        self, plan_base: models.PlanBase, status_value: str, datetimes: bool = True
     ) -> List[Period]:
         """
         Returns the start and end datetimes of lifecycle status for object. Optionally,
@@ -487,7 +487,7 @@ class RyhtiClient:
     def get_event_periods(
         self,
         lifecycle_date: models.LifeCycleDate,
-        event_class: Type[models.CodeBase],
+        event_class: Type[codes.CodeBase],
         event_value: str,
         datetimes: bool = True,
     ) -> List[Period]:
@@ -697,7 +697,7 @@ class RyhtiClient:
             group_dict["planRegulations"].append(self.get_plan_regulation(regulation))
         return group_dict
 
-    def get_plan_object(self, plan_object: base.PlanObjectBase) -> Dict:
+    def get_plan_object(self, plan_object: models.PlanObjectBase) -> Dict:
         """
         Construct a dict of Ryhti compatible plan object.
         """
@@ -729,7 +729,9 @@ class RyhtiClient:
 
         return plan_object_dict
 
-    def _needs_containing_land_use_area(self, plan_object: base.PlanObjectBase) -> bool:
+    def _needs_containing_land_use_area(
+        self, plan_object: models.PlanObjectBase
+    ) -> bool:
         """
         Returns True if the plan object needs a containing land use area as related plan
         object based on the validation rule
@@ -752,7 +754,7 @@ class RyhtiClient:
         )
 
     def _get_containing_land_use_area(
-        self, plan_object: base.PlanObjectBase
+        self, plan_object: models.PlanObjectBase
     ) -> Optional["uuid.UUID"]:
         """
         Returns a land use area id that contains this plan_object.
@@ -767,7 +769,7 @@ class RyhtiClient:
             return session.scalars(stmt).one_or_none()
 
     def _get_related_plan_object_keys(
-        self, plan_object: base.PlanObjectBase
+        self, plan_object: models.PlanObjectBase
     ) -> List["uuid.UUID"]:
         # TODO: there might be other use cases for related plan objects
         related_plan_object_keys = []
@@ -783,7 +785,7 @@ class RyhtiClient:
 
         return related_plan_object_keys
 
-    def get_plan_object_dicts(self, plan_objects: List[base.PlanObjectBase]) -> List:
+    def get_plan_object_dicts(self, plan_objects: List[models.PlanObjectBase]) -> List:
         """
         Construct a list of Ryhti compatible plan object dicts from plan objects
         in the local database.
@@ -794,7 +796,7 @@ class RyhtiClient:
         return plan_object_dicts
 
     def get_plan_regulation_groups(
-        self, plan_objects: List[base.PlanObjectBase]
+        self, plan_objects: List[models.PlanObjectBase]
     ) -> List:
         """
         Construct a list of Ryhti compatible plan regulation groups from plan objects
@@ -822,7 +824,7 @@ class RyhtiClient:
         return group_dicts
 
     def get_plan_regulation_group_relations(
-        self, plan_objects: List[base.PlanObjectBase]
+        self, plan_objects: List[models.PlanObjectBase]
     ) -> List[Dict[str, "uuid.UUID"]]:
         """
         Construct a list of Ryhti compatible plan regulation group relations from plan
@@ -864,7 +866,7 @@ class RyhtiClient:
 
         # Here come the dependent objects. They are related to the plan directly or
         # via the plan objects, so we better fetch the objects first and then move on.
-        plan_objects: List[base.PlanObjectBase] = []
+        plan_objects: List[models.PlanObjectBase] = []
         with self.Session(expire_on_commit=False) as session:
             session.add(plan)
             plan_objects += plan.land_use_areas
