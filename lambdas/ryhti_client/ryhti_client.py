@@ -1812,7 +1812,7 @@ class RyhtiClient:
 
     def save_plan_validation_responses(
         self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+    ) -> dict[UUID, str]:
         """
         Save open validation API response data to the database and return lambda
         response.
@@ -1826,7 +1826,7 @@ class RyhtiClient:
 
         If Ryhti request fails unexpectedly, save the returned error.
         """
-        details: dict[str | UUID, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id, response in responses.items():
                 # Refetch plan from db in case it has been deleted
@@ -1863,14 +1863,7 @@ class RyhtiClient:
                 LOGGER.info(f"Ryhti response: {json.dumps(response)}")
                 plan.validated_at = datetime.datetime.now(tz=LOCAL_TZ)
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plan validations run.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
     def set_plan_documents(self, responses: Dict[UUID, List[RyhtiResponse]]):
         """
@@ -1902,12 +1895,12 @@ class RyhtiClient:
 
     def set_permanent_plan_identifiers(
         self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+    ) -> dict[UUID, str]:
         """
         Save permanent plan identifiers returned by RYHTI API to the database and
         return lambda response.
         """
-        details: dict[UUID | str, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id, response in responses.items():
                 # Make sure that the plan dict stays up to date
@@ -1915,7 +1908,7 @@ class RyhtiClient:
                 session.add(plan)
                 if response["status"] == 200:
                     plan.permanent_plan_identifier = response["detail"]
-                    details[plan_id] = response["detail"]
+                    details[plan_id] = response["detail"]  # type: ignore[assignment]
                 elif response["status"] == 401:
                     details[
                         plan_id
@@ -1923,18 +1916,11 @@ class RyhtiClient:
                 elif response["status"] == 400:
                     details[plan_id] = "Kaavalta puuttuu tuottajan kaavatunnus."
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Possible permanent plan identifiers set.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
     def save_plan_matter_validation_responses(
         self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+    ) -> dict[UUID, str]:
         """
         Save X-Road validation API response data to the database and return lambda
         response.
@@ -1948,7 +1934,7 @@ class RyhtiClient:
 
         If Ryhti request fails unexpectedly, save the returned error.
         """
-        details: dict[UUID | str, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id in self.plans.keys():
                 plan: Optional[models.Plan] = session.get(models.Plan, plan_id)
@@ -1997,18 +1983,11 @@ class RyhtiClient:
                 LOGGER.info(f"Ryhti response: {json.dumps(response)}")
                 plan.validated_at = datetime.datetime.now(tz=LOCAL_TZ)
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plan matter validations run.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
     def save_plan_matter_post_responses(
         self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+    ) -> dict[UUID, str]:
         """
         Save X-Road API POST response data to the database and return lambda response.
 
@@ -2020,7 +1999,7 @@ class RyhtiClient:
 
         If Ryhti request fails unexpectedly, save the returned error.
         """
-        details: dict[UUID | str, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id in self.plans.keys():
                 plan: Optional[models.Plan] = session.get(models.Plan, plan_id)
@@ -2073,14 +2052,7 @@ class RyhtiClient:
                 LOGGER.info(details[plan_id])
                 LOGGER.info(f"Ryhti response: {json.dumps(response)}")
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plan matters POSTed.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
 
 def responsify(
@@ -2218,8 +2190,14 @@ def handler(
             validation_responses = client.validate_plans()
             # 2) Save and return plan validation data
             LOGGER.info("Saving plan validation data...")
-            lambda_response = client.save_plan_validation_responses(
-                validation_responses
+            save_details = client.save_plan_validation_responses(validation_responses)
+            lambda_response = Response(
+                statusCode=200,
+                body=ResponseBody(
+                    title="Plan validations run.",
+                    details=save_details,  # type: ignore[typeddict-item]
+                    ryhti_responses=validation_responses,
+                ),
             )
 
         if event_type is Action.GET_PERMANENT_IDENTIFIERS:
@@ -2230,8 +2208,16 @@ def handler(
             plan_identifier_responses = client.get_permanent_plan_identifiers()
             # 2) Save and return permanent plan identifiers
             LOGGER.info("Setting permanent plan identifiers for plans...")
-            lambda_response = client.set_permanent_plan_identifiers(
+            save_details = client.set_permanent_plan_identifiers(
                 plan_identifier_responses
+            )
+            lambda_response = Response(
+                statusCode=200,
+                body=ResponseBody(
+                    title="Possible permanent plan identifiers set.",
+                    details=save_details,  # type: ignore[typeddict-item]
+                    ryhti_responses=plan_identifier_responses,
+                ),
             )
 
         if event_type is Action.VALIDATE_PLAN_MATTERS:
@@ -2254,7 +2240,15 @@ def handler(
             responses = client.validate_plan_matters()
             # 3) Save and return plan matter validation data
             LOGGER.info("Saving plan matter validation data for plans...")
-            lambda_response = client.save_plan_matter_validation_responses(responses)
+            save_details = client.save_plan_matter_validation_responses(responses)
+            lambda_response = Response(
+                statusCode=200,
+                body=ResponseBody(
+                    title="Plan matter validations run.",
+                    details=save_details,  # type: ignore[typeddict-item]
+                    ryhti_responses=responses,
+                ),
+            )
 
         if event_type is Action.POST_PLAN_MATTERS:
             LOGGER.info("Authenticating to X-road Ryhti API...")
@@ -2269,7 +2263,15 @@ def handler(
             responses = client.post_plan_matters()
             # 3) Save and return plan matter update responses
             LOGGER.info("Saving plan matter POST data for posted plans...")
-            lambda_response = client.save_plan_matter_post_responses(responses)
+            save_details = client.save_plan_matter_post_responses(responses)
+            lambda_response = Response(
+                statusCode=200,
+                body=ResponseBody(
+                    title="Plan matters POSTed.",
+                    details=save_details,  # type: ignore[typeddict-item]
+                    ryhti_responses=responses,
+                ),
+            )
     else:
         lambda_response = Response(
             statusCode=200,
