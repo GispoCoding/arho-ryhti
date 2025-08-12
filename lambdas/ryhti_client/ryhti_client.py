@@ -1887,14 +1887,7 @@ class RyhtiClient:
                 ):
                     session.add(document)
                     if document_response["status"] == 201:
-                        try:
-                            file_key = UUID(document_response["detail"])
-                        except ValueError:
-                            LOGGER.error(
-                                f"Could not parse file key {document_response['detail']} for document {document.id}!"  # noqa
-                            )
-                            continue
-                        document.exported_file_key = file_key
+                        document.exported_file_key = document_response["detail"]
                         document.exported_at = datetime.datetime.now(tz=LOCAL_TZ)
                         # Save the etag of the uploaded file, piggybacked in response
                         if document_response["warnings"]:
