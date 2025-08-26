@@ -2,17 +2,19 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from alembic_utils.pg_function import PGFunction
-from alembic_utils.pg_trigger import PGTrigger
+from alembic_utils.pg_extension import PGExtension
+from alembic_utils.pg_grant_table import PGGrantTable
 from alembic_utils.replaceable_entity import register_entities
 from sqlalchemy import create_engine
 
 # *ALL* sqlalchemy models have to be imported so that alembic detects all tables
 from database.base import Base
 from database.codes import *  # noqa
+from database.functions import functions
 from database.models import *  # noqa
 from database.triggers import (
     generate_add_plan_id_fkey_triggers,
+    generate_instead_of_triggers_for_visualization_views,
     generate_modified_at_triggers,
     generate_new_lifecycle_date_triggers,
     generate_new_lifecycle_status_triggers,
@@ -21,19 +23,18 @@ from database.triggers import (
 )
 from database.validation import (
     generate_validate_polygon_geometry_triggers,
-    trg_prevent_land_use_area_overlaps,
     trg_validate_event_date,
     trg_validate_event_date_inside_status_date,
     trg_validate_event_type,
     trg_validate_lifecycle_date,
     trg_validate_line_geometry,
-    trgfunc_prevent_land_use_area_overlaps,
     trgfunc_validate_event_date,
     trgfunc_validate_event_date_inside_status_date,
     trgfunc_validate_event_type,
     trgfunc_validate_lifecycle_date,
     trgfunc_validate_line_geometry,
 )
+from database.views import views
 
 modified_at_trgs, modified_at_trgfuncs = generate_modified_at_triggers()
 
@@ -64,6 +65,12 @@ add_plan_id_fkey_trgs, add_plan_id_fkey_trgfuncs = generate_add_plan_id_fkey_tri
     validate_polygon_geometry_trgfuncs,
 ) = generate_validate_polygon_geometry_triggers()
 
+(
+    instead_of_trigger_func_for_visualization_view,
+    instead_of_triggers_for_visualization_views,
+) = generate_instead_of_triggers_for_visualization_views()
+
+
 imported_triggers = (
     modified_at_trgfuncs
     + modified_at_trgs
@@ -79,10 +86,10 @@ imported_triggers = (
     + add_plan_id_fkey_trgs
     + validate_polygon_geometry_trgfuncs
     + validate_polygon_geometry_trgs
+    + instead_of_trigger_func_for_visualization_view
+    + instead_of_triggers_for_visualization_views
     + [trg_validate_line_geometry]
     + [trgfunc_validate_line_geometry]
-    + [trgfunc_prevent_land_use_area_overlaps]
-    + [trg_prevent_land_use_area_overlaps]
     + [trgfunc_validate_lifecycle_date]
     + [trg_validate_lifecycle_date]
     + [trgfunc_validate_event_date]
@@ -93,7 +100,9 @@ imported_triggers = (
     + [trg_validate_event_type]
 )
 
-register_entities(entities=imported_triggers, entity_types=[PGTrigger, PGFunction])
+register_entities(imported_triggers)
+register_entities(functions)
+register_entities(views)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -117,18 +126,24 @@ target_metadata = Base.metadata
 # ... etc.
 
 
-# Do not check PostGIS extension tables
 def include_object(object, name, type_, reflected, compare_to):
-    if type_ == "table" and name == "spatial_ref_sys":
+    # Extension installs are managed by the AWS RDS.
+    # Manage table grants manually for now.
+    if isinstance(object, (PGGrantTable, PGExtension)):
         return False
     else:
         return True
 
 
-# Check our schemas
 def include_name(name, type_, parent_names):
-    if type_ in "schema":
-        return name in ["hame", "codes"]
+    # Do not check PostGIS extension tables
+    if type_ == "table" and name in {"spatial_ref_sys"}:
+        return False
+    if type_ == "view" and name in {
+        "public.geometry_columns",
+        "public.geography_columns",
+    }:
+        return False
     else:
         return True
 
