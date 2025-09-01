@@ -9,3 +9,6 @@ simplejson
 sqlalchemy
 alembic_utils
 pygml
+pydantic
+
+git+https://github.com/GispoCoding/ryhti-api-client@v2025.33.1#egg=ryhti_api_client

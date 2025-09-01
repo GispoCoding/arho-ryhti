@@ -232,23 +232,31 @@ class Plan(PlanBase):
     plan_type: Mapped["PlanType"] = relationship(back_populates="plans", lazy="joined")
     # Also join plan documents
     documents: Mapped[List["Document"]] = relationship(
-        back_populates="plan", lazy="joined", cascade="delete"
+        back_populates="plan", lazy="joined", cascade="all, delete-orphan"
     )
     # Load plan objects ordered
     land_use_areas: Mapped[List["LandUseArea"]] = relationship(
-        order_by="LandUseArea.ordering", back_populates="plan"
+        order_by="LandUseArea.ordering",
+        back_populates="plan",
+        cascade="all, delete-orphan",
     )
     other_areas: Mapped[List["OtherArea"]] = relationship(
-        order_by="OtherArea.ordering", back_populates="plan"
+        order_by="OtherArea.ordering",
+        back_populates="plan",
+        cascade="all, delete-orphan",
     )
     lines: Mapped[List["Line"]] = relationship(
-        order_by="Line.ordering", back_populates="plan"
+        order_by="Line.ordering", back_populates="plan", cascade="all, delete-orphan"
     )
     land_use_points: Mapped[List["LandUsePoint"]] = relationship(
-        order_by="LandUsePoint.ordering", back_populates="plan"
+        order_by="LandUsePoint.ordering",
+        back_populates="plan",
+        cascade="all, delete-orphan",
     )
     other_points: Mapped[List["OtherPoint"]] = relationship(
-        order_by="OtherPoint.ordering", back_populates="plan"
+        order_by="OtherPoint.ordering",
+        back_populates="plan",
+        cascade="all, delete-orphan",
     )
 
     permanent_plan_identifier: Mapped[Optional[str]]
@@ -267,6 +275,10 @@ class Plan(PlanBase):
     validated_at: Mapped[Optional[datetime]]
     validation_errors: Mapped[Optional[dict[str, str]]]
 
+    regulation_groups: Mapped[List["PlanRegulationGroup"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan"
+    )
+
     general_plan_regulation_groups: Mapped[List["PlanRegulationGroup"]] = relationship(
         secondary=regulation_group_association,
         lazy="joined",
@@ -284,7 +296,9 @@ class Plan(PlanBase):
         back_populates="plans",
     )
 
-    source_data: Mapped[List["SourceData"]] = relationship(back_populates="plan")
+    source_data: Mapped[List["SourceData"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan"
+    )
 
 
 class PlanObjectBase(PlanBase):
@@ -447,7 +461,7 @@ class PlanRegulationGroup(VersionedBase):
         comment="Plan to which this regulation group belongs",
         index=True,
     )
-    plan: Mapped["Plan"] = relationship()
+    plan: Mapped["Plan"] = relationship(back_populates="regulation_groups")
 
     ordering: Mapped[Optional[int]]
 

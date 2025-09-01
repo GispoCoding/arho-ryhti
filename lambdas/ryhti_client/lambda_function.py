@@ -1,13 +1,18 @@
 import enum
 import logging
 import os
-from typing import TYPE_CHECKING, Dict, Literal, Optional, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, TypedDict, cast
 from uuid import UUID
 
 import boto3
 import simplejson as json
 
 from database.db_helper import DatabaseHelper, User
+from ryhti_client.importer import (
+    Importer,
+    plan_matter_data_from_json,
+    ryhti_plan_from_json,
+)
 from ryhti_client.ryhti_client import RyhtiClient
 
 if TYPE_CHECKING:
@@ -54,7 +59,7 @@ class ResponseBody(TypedDict):
     """
 
     title: str
-    details: dict[str | UUID, str | None]
+    details: Any
     ryhti_responses: dict[UUID, "RyhtiResponse"]
 
 
@@ -86,6 +91,8 @@ class Event(TypedDict):
     action: str  # Action
     plan_uuid: Optional[str]  # UUID for plan to be used
     save_json: Optional[bool]  # True if we want JSON files to be saved in ryhti_debug
+    data: Optional[dict]  # Additional data to be used in the action, if needed
+    force: Optional[bool]  # True if we want to force the action, if needed
 
 
 class AWSAPIGatewayPayload(TypedDict):
@@ -140,6 +147,7 @@ class Action(enum.Enum):
     GET_PLAN_MATTERS = "get_plan_matters"
     VALIDATE_PLAN_MATTERS = "validate_plan_matters"
     POST_PLAN_MATTERS = "post_plan_matters"
+    IMPORT_PLAN = "import_plan"
 
 
 def handler(
@@ -243,7 +251,7 @@ def handler(
                 ),
             )
 
-        if event_type is Action.GET_PLAN_MATTERS:
+        elif event_type is Action.GET_PLAN_MATTERS:
             # just return the JSON to the user
             LOGGER.info("Formatting plan matter data...")
             plan_matters = database_client.get_plan_matters()
@@ -258,7 +266,7 @@ def handler(
                 ),
             )
 
-        if event_type is Action.VALIDATE_PLANS:
+        elif event_type is Action.VALIDATE_PLANS:
             # 1) Validate plans in database with public API
             LOGGER.info("Validating plans...")
             validation_responses = client.validate_plans()
@@ -276,7 +284,7 @@ def handler(
                 ),
             )
 
-        if event_type is Action.GET_PERMANENT_IDENTIFIERS:
+        elif event_type is Action.GET_PERMANENT_IDENTIFIERS:
             LOGGER.info("Authenticating to X-road Ryhti API...")
             client.xroad_ryhti_authenticate()
             # 1) Check or create permanent plan identifiers, from X-Road API
@@ -296,7 +304,7 @@ def handler(
                 ),
             )
 
-        if event_type is Action.VALIDATE_PLAN_MATTERS:
+        elif event_type is Action.VALIDATE_PLAN_MATTERS:
             LOGGER.info("Authenticating to X-road Ryhti API...")
             client.xroad_ryhti_authenticate()
             # Documents are exported separately from plan matter. Also, they need to be
@@ -328,7 +336,7 @@ def handler(
                 ),
             )
 
-        if event_type is Action.POST_PLAN_MATTERS:
+        elif event_type is Action.POST_PLAN_MATTERS:
             LOGGER.info("Authenticating to X-road Ryhti API...")
             client.xroad_ryhti_authenticate()
             # 1) If changed documents exist, upload documents
@@ -350,6 +358,38 @@ def handler(
                     ryhti_responses=responses,
                 ),
             )
+
+        elif event_type is Action.IMPORT_PLAN:
+            force = True if event.get("force") is True else False
+            value_error = None
+            if (data := event.get("data")) is None:
+                value_error = None
+            if (plan_data := data.get("plan_data")) is None:
+                value_error = None
+            if (extra_data := data.get("extra_data")) is None:
+                value_error = None
+
+            try:
+                plan = ryhti_plan_from_json(plan_data)
+                plan_matter_data = plan_matter_data_from_json(extra_data)
+            except ValueError as e:
+                ...
+
+            importer = Importer()
+            try:
+                imported = importer.import_plan(plan, plan_matter_data, force)
+            except Exception as e:
+                pass
+
+            lambda_response = Response(
+                statusCode=200,
+                body=ResponseBody(
+                    title="",
+                    details="",
+                    ryhti_responses={},
+                ),
+            )
+
     else:
         lambda_response = Response(
             statusCode=200,
