@@ -1,24 +1,9 @@
 import datetime
-import email.utils
-import enum
 import logging
-import os
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    List,
-    Literal,
-    Optional,
-    Type,
-    TypedDict,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, cast
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-import boto3
-import requests
 import simplejson as json  # type: ignore
 from geoalchemy2 import WKBElement
 from geoalchemy2.shape import to_shape
@@ -38,289 +23,35 @@ from database.codes import (
     interaction_events_by_status,
     processing_events_by_status,
 )
-from database.db_helper import DatabaseHelper, User
 from database.enums import AttributeValueDataType
+from ryhti_client.ryhti_schema import (
+    Period,
+    RyhtiHandlingEvent,
+    RyhtiInteractionEvent,
+    RyhtiPlan,
+    RyhtiPlanDecision,
+    RyhtiPlanMatter,
+    RyhtiPlanMatterPhase,
+)
 
 if TYPE_CHECKING:
     import uuid
 
-"""
-Client for validating and POSTing all Maakuntakaava data to Ryhti API
-at https://api.ymparisto.fi/ryhti/plan-public/api/
+    from ryhti_client.ryhti_client import RyhtiResponse
 
-Validation API:
-https://github.com/sykefi/Ryhti-rajapintakuvaukset/blob/main/OpenApi/Kaavoitus/Avoin/ryhti-plan-public-validate-api.json
+LOGGER = logging.getLogger(__name__)
 
-X-Road POST API:
-https://github.com/sykefi/Ryhti-rajapintakuvaukset/blob/main/OpenApi/Kaavoitus/Palveluväylä/Kaavoitus%20OpenApi.json
-"""
-
-# All non-request specific initialization should be done *before* the handler
-# method is run. It is run with burst CPU, so we will get faster initialization.
-# Boto3 and db helper initialization should go here.
-LOGGER = logging.getLogger()
-LOGGER.setLevel(logging.INFO)
 LOCAL_TZ = ZoneInfo("Europe/Helsinki")
 
-# write access is required to update plan information after
-# validating or POSTing data
-db_helper = DatabaseHelper(user=User.READ_WRITE)
-# Let's fetch the syke secret from AWS secrets, so it cannot be read in plain
-# text when looking at lambda env variables.
-if os.environ.get("READ_FROM_AWS", "1") == "1":
-    session = boto3.session.Session()
-    client = session.client(
-        service_name="secretsmanager",
-        region_name=os.environ.get("AWS_REGION_NAME", ""),
-    )
-    xroad_syke_client_secret = client.get_secret_value(
-        SecretId=os.environ.get("XROAD_SYKE_CLIENT_SECRET_ARN", "")
-    )["SecretString"]
-else:
-    xroad_syke_client_secret = os.environ.get("XROAD_SYKE_CLIENT_SECRET", "")
-public_api_key = os.environ.get("SYKE_APIKEY", "")
-if not public_api_key:
-    raise ValueError("Please set SYKE_APIKEY environment variable to run Ryhti client.")
-xroad_server_address = os.environ.get("XROAD_SERVER_ADDRESS", "")
-xroad_member_code = os.environ.get("XROAD_MEMBER_CODE", "")
-xroad_member_client_name = os.environ.get("XROAD_MEMBER_CLIENT_NAME", "")
-xroad_port = int(os.environ.get("XROAD_HTTP_PORT", 8080))
-xroad_instance = os.environ.get("XROAD_INSTANCE", "FI-TEST")
-xroad_member_class = os.environ.get("XROAD_MEMBER_CLASS", "MUN")
-xroad_syke_client_id = os.environ.get("XROAD_SYKE_CLIENT_ID", "")
 
-
-class Action(enum.Enum):
-    GET_PLANS = "get_plans"
-    VALIDATE_PLANS = "validate_plans"
-    GET_PERMANENT_IDENTIFIERS = "get_permanent_plan_identifiers"
-    GET_PLAN_MATTERS = "get_plan_matters"
-    VALIDATE_PLAN_MATTERS = "validate_plan_matters"
-    POST_PLAN_MATTERS = "post_plan_matters"
-
-
-class RyhtiResponse(TypedDict):
-    """
-    Represents the response of the Ryhti API to a single API all.
-    """
-
-    status: int | None
-    detail: Optional[str]
-    errors: Optional[dict]
-    warnings: Optional[dict]
-
-
-class ResponseBody(TypedDict):
-    """
-    Data returned in lambda function response.
-    """
-
-    title: str
-    details: dict[str | UUID, str | None]
-    ryhti_responses: dict[UUID, RyhtiResponse]
-
-
-class Response(TypedDict):
-    """
-    Represents the response of the lambda function to the caller.
-
-    Let's abide by the AWS API Gateway 2.0 response format. If we want to specify
-    a custom status code, this means that other data must be embedded in request body.
-
-    https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
-    """
-
-    statusCode: int  # noqa N815
-    body: ResponseBody
-
-
-class Event(TypedDict):
-    """
-    Support validating, POSTing or getting a desired plan. If provided directly to
-    lambda, the lambda request needs only contain these keys.
-
-    If plan_uuid is empty, all plans in database are processed.
-
-    If save_json is true, generated JSON as well as Ryhti API response are saved
-    as {plan_id}.json and {plan_id}.response.json in the ryhti_debug directory.
-    """
-
-    action: str  # Action
-    plan_uuid: Optional[str]  # UUID for plan to be used
-    save_json: Optional[bool]  # True if we want JSON files to be saved in ryhti_debug
-
-
-class AWSAPIGatewayPayload(TypedDict):
-    """
-    Represents the request coming to Lambda through AWS API Gateway.
-
-    The same request may arrive to lambda either through AWS integrations or API
-    Gateway. If arriving through the API Gateway, it will contain all data that
-    were contained in the whole HTTPS request, and the event is found in request body.
-
-    https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
-    """
-
-    version: Literal["2.0"]
-    headers: Dict
-    queryStringParameters: Dict
-    requestContext: Dict
-    body: str  # The event is stringified json, we have to jsonify it first
-
-
-class AWSAPIGatewayResponse(TypedDict):
-    """
-    Represents the response from Lambda to AWS API Gateway.
-
-    For the API gateway, we just have to stringify the body.
-    """
-
-    statusCode: int
-    body: str  # Response body must be stringified for API gateway
-
-
-class Period(TypedDict):
-    begin: str
-    end: str | None
-
-
-# Typing for ryhti dicts
-class RyhtiPlan(TypedDict, total=False):
-    planKey: str
-    lifeCycleStatus: str
-    scale: int
-    legalEffectOfLocalMasterPlans: List | None
-    geographicalArea: Dict
-    periodOfValidity: Period | None
-    approvalDate: str | None
-    planMaps: List
-    planAnnexes: List
-    otherPlanMaterials: List
-    planReport: Dict | None
-    generalRegulationGroups: List[Dict]
-    planDescription: str | None
-    planObjects: List
-    planRegulationGroups: List
-    planRegulationGroupRelations: List
-
-
-class RyhtiPlanDecision(TypedDict, total=False):
-    planDecisionKey: str
-    name: str
-    decisionDate: str
-    dateOfDecision: str
-    typeOfDecisionMaker: str
-    plans: List[RyhtiPlan]
-
-
-class RyhtiHandlingEvent(TypedDict, total=False):
-    handlingEventKey: str
-    handlingEventType: str
-    eventTime: str
-    cancelled: bool
-
-
-class RyhtiInteractionEvent(TypedDict, total=False):
-    interactionEventKey: str
-    interactionEventType: str
-    eventTime: Period
-
-
-class RyhtiPlanMatterPhase(TypedDict, total=False):
-    planMatterPhaseKey: str
-    lifeCycleStatus: str
-    geographicalArea: Dict
-    handlingEvent: RyhtiHandlingEvent | None
-    interactionEvents: List[RyhtiInteractionEvent] | None
-    planDecision: RyhtiPlanDecision | None
-
-
-class RyhtiPlanMatter(TypedDict, total=False):
-    permanentPlanIdentifier: str
-    planType: str
-    name: Dict
-    timeOfInitiation: str | None
-    description: Dict
-    producerPlanIdentifier: str
-    caseIdentifiers: List
-    recordNumbers: List
-    administrativeAreaIdentifiers: List
-    digitalOrigin: str
-    planMatterPhases: List[RyhtiPlanMatterPhase]
-
-
-class RyhtiClient:
-    HEADERS = {
-        "User-Agent": "ARHO - Open source Ryhti compatible database",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Accept-Language": "fi-FI",
-    }
-    public_api_base = "https://api.ymparisto.fi/ryhti/plan-public/api/"
-    xroad_server_address = ""
-    xroad_api_path = "/GOV/0996189-5/Ryhti-Syke-service/planService/api/"
-    public_headers = HEADERS.copy()
-    xroad_headers = HEADERS.copy()
-
-    def __init__(
-        self,
-        connection_string: str,
-        public_api_url: Optional[str] = None,
-        public_api_key: str = "",
-        xroad_syke_client_id: Optional[str] = "",
-        xroad_syke_client_secret: Optional[str] = "",
-        xroad_server_address: Optional[str] = None,
-        xroad_instance: str = "FI-TEST",
-        xroad_member_class: Optional[str] = "MUN",
-        xroad_member_code: Optional[str] = None,
-        xroad_member_client_name: Optional[str] = None,
-        xroad_port: Optional[int] = 8080,
-        event_type: Action = Action.VALIDATE_PLANS,
-        plan_uuid: Optional[str] = None,
-        debug_json: Optional[bool] = False,  # save JSON files for debugging
-    ) -> None:
-        LOGGER.info("Initializing Ryhti client...")
-        self.event_type = event_type
-        self.debug_json = debug_json
-
-        # Public API only needs an API key and URL
-        if public_api_url:
-            self.public_api_base = public_api_url
-        self.public_api_key = public_api_key
-        self.public_headers |= {"Ocp-Apim-Subscription-Key": self.public_api_key}
-
-        # X-Road API needs path and headers configured
-        if xroad_server_address:
-            self.xroad_server_address = xroad_server_address
-            # do not require http in front of local dns record
-            if not (
-                xroad_server_address.startswith("http://")
-                or xroad_server_address.startswith("https://")
-            ):
-                self.xroad_server_address = "http://" + self.xroad_server_address
-        if xroad_port:
-            self.xroad_server_address += ":" + str(xroad_port)
-        # X-Road API requires specifying X-Road instance in path
-        self.xroad_api_path = "/r1/" + xroad_instance + self.xroad_api_path
-        # X-Road API requires headers according to the X-Road REST API spec
-        # https://docs.x-road.global/Protocols/pr-rest_x-road_message_protocol_for_rest.html#4-message-format
-        if xroad_member_code and xroad_member_client_name:
-            self.xroad_headers |= {
-                "X-Road-Client": f"{xroad_instance}/{xroad_member_class}/{xroad_member_code}/{xroad_member_client_name}"  # noqa
-            }
-        # In addition, X-Road Ryhti API will require authentication token that
-        # will be set later based on these:
-        self.xroad_syke_client_id = xroad_syke_client_id
-        self.xroad_syke_client_secret = xroad_syke_client_secret
-
+class DatabaseClient:
+    def __init__(self, connection_string: str, plan_uuid: Optional[str] = None):
         engine = create_engine(connection_string)
         self.Session = sessionmaker(bind=engine)
         # Cache plans fetched from database
         self.plans: Dict[UUID, models.Plan] = dict()
         # Cache plan dictionaries
         self.plan_dictionaries: Dict[UUID, RyhtiPlan] = dict()
-        # Cache plan matter dictionaries
-        self.plan_matter_dictionaries: Dict[UUID, RyhtiPlanMatter] = dict()
 
         # We only ever need code uri values, not codes themselves, so let's not bother
         # fetching codes from the database at all. URI is known from class and value.
@@ -361,54 +92,6 @@ class RyhtiClient:
             self.plan_dictionaries = self.get_plan_dictionaries()
             LOGGER.info("Client initialized with plans to process:")
             LOGGER.info(self.plans)
-
-    def xroad_ryhti_authenticate(self):
-        """
-        Set the client authentication header for making X-Road API requests.
-        """
-        # Seems that Ryhti API does not use the standard OAuth2 client credentials
-        # clientId:secret Bearer header in token endpoint. Instead, there is a custom
-        # authentication endpoint /api/Authenticate that wishes us to deliver the
-        # client secret as a *single JSON string*, which is not compatible with
-        # RFC 4627, but *is* compatible with newer RFC 8259.
-        authentication_data = json.dumps(self.xroad_syke_client_secret)
-        authentication_url = (
-            self.xroad_server_address + self.xroad_api_path + "Authenticate"
-        )
-        url_params = {"clientId": self.xroad_syke_client_id}
-        LOGGER.info("Authentication headers")
-        LOGGER.info(self.xroad_headers)
-        LOGGER.info("Authentication URL")
-        LOGGER.info(authentication_url)
-        LOGGER.info("URL parameters")
-        LOGGER.info(url_params)
-        response = requests.post(
-            url=authentication_url,
-            headers=self.xroad_headers,
-            data=authentication_data,
-            params=url_params,
-        )
-        LOGGER.info("Authentication response:")
-        LOGGER.info(response.status_code)
-        LOGGER.info(response.headers)
-        LOGGER.info(response.text)
-        response.raise_for_status()
-        # The returned token is a jsonified string, so json() will return the bare
-        # string.
-        bearer_token = response.json()
-        self.xroad_headers["Authorization"] = f"Bearer {bearer_token}"
-
-    def get_plan_matter_api_path(self, plan_type_uri: str) -> str:
-        """
-        Returns correct plan matter api path depending on the plan type URI.
-        """
-        api_paths = {
-            "1": "RegionalPlanMatter/",
-            "2": "LocalMasterPlanMatter/",
-            "3": "LocalDetailedPlanMatter/",
-        }
-        top_level_code = plan_type_uri.split("/")[-1][0]
-        return api_paths[top_level_code]
 
     def get_geojson(self, geometry: WKBElement) -> dict:
         """
@@ -1322,499 +1005,9 @@ class RyhtiClient:
         """
         return {plan.id: self.get_plan_matter(plan) for plan in self.plans.values()}
 
-    def validate_plans(self) -> Dict[UUID, RyhtiResponse]:
-        """
-        Validates all plans serialized in client plan dictionaries.
-        """
-        plan_validation_endpoint = f"{self.public_api_base}/Plan/validate"
-        responses: Dict[UUID, RyhtiResponse] = {}
-        for plan_id, plan_dict in self.plan_dictionaries.items():
-            LOGGER.info(f"Validating JSON for plan {plan_id}...")
-
-            # Some plan fields may only be present in plan matter, not in the plan
-            # dictionary. In the context of plan validation, they must be provided as
-            # query parameters.
-            plan = self.plans[plan_id]
-            plan_type_parameter = plan.plan_type.value
-            # We only support one area id, no need for commas and concat:
-            admin_area_id_parameter = (
-                plan.organisation.municipality.value
-                if plan.organisation.municipality
-                else plan.organisation.administrative_region.value
-            )
-            if self.debug_json:
-                with open(f"ryhti_debug/{plan_id}.json", "w") as plan_file:
-                    json.dump(plan_dict, plan_file)
-            LOGGER.info(f"POSTing JSON: {json.dumps(plan_dict)}")
-
-            # requests apparently uses simplejson automatically if it is installed!
-            # A bit too much magic for my taste, but seems to work.
-            response = requests.post(
-                plan_validation_endpoint,
-                json=plan_dict,
-                headers=self.public_headers,
-                params={
-                    "planType": plan_type_parameter,
-                    "administrativeAreaIdentifiers": admin_area_id_parameter,
-                },
-            )
-            LOGGER.info(f"Got response {response}")
-            if response.status_code == 200:
-                # Successful validation does not return any json!
-                responses[plan_id] = {
-                    "status": 200,
-                    "errors": None,
-                    "detail": None,
-                    "warnings": None,
-                }
-            else:
-                try:
-                    # Validation errors always contain JSON
-                    responses[plan_id] = response.json()
-                except json.JSONDecodeError:
-                    # There is something wrong with the API
-                    response.raise_for_status()
-            if self.debug_json:
-                with open(f"ryhti_debug/{plan_id}.response.json", "w") as response_file:
-                    json.dump(responses[plan_id], response_file)
-            LOGGER.info(responses[plan_id])
-        return responses
-
-    def upload_plan_documents(self) -> Dict[UUID, List[RyhtiResponse]]:
-        """
-        Upload any changed plan documents. If document has not been modified
-        since it was last uploaded, do nothing.
-        """
-        responses: Dict[UUID, List[RyhtiResponse]] = dict()
-        file_endpoint = self.xroad_server_address + self.xroad_api_path + "File"
-        upload_headers = self.xroad_headers.copy()
-        # We must *not* provide Content-Type header:
-        # https://blog.jetbridge.com/multipart-encoded-python-requests/
-        del upload_headers["Content-Type"]
-        for plan in self.plans.values():
-            # Only upload documents for plans that are actually going to Ryhti
-            if not plan.permanent_plan_identifier:
-                continue
-            responses[plan.id] = []
-            municipality = (
-                plan.organisation.municipality.value
-                if plan.organisation.municipality
-                else None
-            )
-            region = plan.organisation.administrative_region.value
-            for document in plan.documents:
-                if document.url:
-                    # No need to upload if document hasn't changed
-                    headers = requests.head(document.url).headers
-                    print(headers)
-                    etag = headers.get("ETag")
-                    last_modified = headers.get("Last-Modified")
-                    if (
-                        document.exported_file_etag
-                        and document.exported_file_etag == etag
-                    ) or (
-                        document.exported_at
-                        and last_modified
-                        and document.exported_at
-                        > email.utils.parsedate_to_datetime(last_modified)
-                    ):
-                        LOGGER.info("File unchanged since last upload.")
-                        responses[plan.id].append(
-                            RyhtiResponse(
-                                status=None,
-                                detail="File unchanged since last upload.",
-                                errors=None,
-                                # Let's just piggyback the etag in the response.
-                                warnings={"ETag": etag},
-                            )
-                        )
-                        continue
-                    # Let's try streaming the file instead of downloading
-                    # and then uploading:
-                    file_request = requests.get(document.url, stream=True)
-                    if file_request.status_code == 200:
-                        file_name = document.url.split("/")[-1]
-                        file_type = file_request.headers["Content-Type"]
-                        # Just read the whole file to memory when sending it.
-                        # That might require increasing lambda memory for big
-                        # files, but could not get streaming upload to work :(
-                        files = {
-                            "file": (
-                                file_name,
-                                file_request.raw,
-                                file_type,
-                            )
-                        }
-                        # TODO: get coordinate system from file. Maybe not easy
-                        # if just streaming it thru.
-                        post_parameters = (
-                            {"municipalityId": municipality}
-                            if municipality
-                            else {"regionId": region}
-                        )
-                        post_response = requests.post(
-                            file_endpoint,
-                            files=files,
-                            params=post_parameters,
-                            headers=upload_headers,
-                        )
-                        if post_response.status_code == 201:
-                            LOGGER.info(f"Posted file {post_response.json()}")
-                            responses[plan.id].append(
-                                RyhtiResponse(
-                                    status=201,
-                                    detail=post_response.json(),
-                                    errors=None,
-                                    # Let's just piggyback the etag in the response.
-                                    warnings={"ETag": etag},
-                                )
-                            )
-                        else:
-                            LOGGER.warning(f"Could not upload file {file_name}!")
-                            LOGGER.warning(post_response.json())
-                            responses[plan.id].append(
-                                RyhtiResponse(
-                                    status=post_response.status_code,
-                                    detail=f"Could not upload file {file_name}!",
-                                    errors=post_response.json(),
-                                    warnings=None,
-                                )
-                            )
-                    else:
-                        LOGGER.warning("Could not fetch file! Please check file URL.")
-                        responses[plan.id].append(
-                            RyhtiResponse(
-                                status=None,
-                                detail="Could not fetch file! Please check file URL.",
-                                errors=None,
-                                warnings=None,
-                            )
-                        )
-        return responses
-
-    def get_permanent_plan_identifiers(self) -> Dict[UUID, RyhtiResponse]:
-        """
-        Get permanent plan identifiers for all plans that do not have identifiers set.
-        """
-        responses: Dict[UUID, RyhtiResponse] = dict()
-        for plan in self.plans.values():
-            if not plan.permanent_plan_identifier:
-                plan_identifier_endpoint = (
-                    self.xroad_server_address
-                    + self.xroad_api_path
-                    + self.get_plan_matter_api_path(plan.plan_type.uri)
-                    + "permanentPlanIdentifier"
-                )
-                LOGGER.info(f"Getting permanent identifier for plan {plan.id}...")
-                administrative_area_identifier = (
-                    plan.organisation.municipality.value
-                    if plan.organisation.municipality
-                    else plan.organisation.administrative_region.value
-                )
-                data = {
-                    "administrativeAreaIdentifier": administrative_area_identifier,
-                    "projectName": plan.producers_plan_identifier,
-                }
-                LOGGER.info("Request headers")
-                LOGGER.info(self.xroad_headers)
-                LOGGER.info("Request URL")
-                LOGGER.info(plan_identifier_endpoint)
-                LOGGER.info("Request data")
-                LOGGER.info(data)
-                response = requests.post(
-                    plan_identifier_endpoint, json=data, headers=self.xroad_headers
-                )
-                LOGGER.info("Plan identifier response:")
-                LOGGER.info(response.status_code)
-                LOGGER.info(response.headers)
-                LOGGER.info(response.text)
-                if response.status_code == 401:
-                    detail = "No permission to get plan identifier in this region or municipality!"  # noqa
-                    LOGGER.info(detail)
-                    responses[plan.id] = {
-                        "status": 401,
-                        "errors": response.json(),
-                        "detail": detail,
-                        "warnings": None,
-                    }
-                elif response.status_code == 400:
-                    detail = "Could not get identifier! Most likely producers_plan_identifier is missing."  # noqa
-                    LOGGER.info(detail)
-                    responses[plan.id] = {
-                        "status": 400,
-                        "errors": response.json(),
-                        "detail": detail,
-                        "warnings": None,
-                    }
-                else:
-                    response.raise_for_status()
-                    LOGGER.info(f"Received identifier {response.json()}")
-                    responses[plan.id] = {
-                        "status": 200,
-                        "detail": response.json(),
-                        "errors": None,
-                        "warnings": None,
-                    }
-                if self.debug_json:
-                    with open(
-                        f"ryhti_debug/{plan.id}.identifier.response.json", "w"
-                    ) as response_file:
-                        response_file.write(str(plan_identifier_endpoint) + "\n")
-                        response_file.write(str(self.xroad_headers) + "\n")
-                        response_file.write(str(data) + "\n")
-                        json.dump(str(responses[plan.id]), response_file)
-        return responses
-
-    def validate_plan_matters(self) -> Dict[UUID, RyhtiResponse]:
-        """
-        Validates all plan matters that have their permanent identifiers set.
-        """
-        self.plan_matter_dictionaries = self.get_plan_matters()
-        responses: Dict[UUID, RyhtiResponse] = dict()
-        for plan_id, plan_matter in self.plan_matter_dictionaries.items():
-            permanent_id = plan_matter["permanentPlanIdentifier"]
-            if not permanent_id:
-                LOGGER.info("Plan has no permanent id, cannot validate plan matter.")
-                continue
-            plan_matter_validation_endpoint = (
-                self.xroad_server_address
-                + self.xroad_api_path
-                + self.get_plan_matter_api_path(plan_matter["planType"])
-                + f"{permanent_id}/validate"
-            )
-            LOGGER.info(f"Validating JSON for plan matter {permanent_id}...")
-
-            if self.debug_json:
-                with open(f"ryhti_debug/{permanent_id}.json", "w") as plan_file:
-                    json.dump(plan_matter, plan_file)
-            LOGGER.info(f"POSTing JSON: {json.dumps(plan_matter)}")
-
-            # requests apparently uses simplejson automatically if it is installed!
-            # A bit too much magic for my taste, but seems to work.
-            response = requests.post(
-                plan_matter_validation_endpoint,
-                json=plan_matter,
-                headers=self.xroad_headers,
-            )
-            LOGGER.info(f"Got response {response}")
-            LOGGER.info(response.text)
-            if response.status_code == 200:
-                # Successful validation might return warnings
-                responses[plan_id] = {
-                    "status": 200,
-                    "errors": None,
-                    "detail": None,
-                    "warnings": response.json()["warnings"],
-                }
-            else:
-                try:
-                    # Validation errors always contain JSON
-                    responses[plan_id] = response.json()
-                except json.JSONDecodeError:
-                    # There is something wrong with the API
-                    response.raise_for_status()
-            if self.debug_json:
-                with open(
-                    f"ryhti_debug/{permanent_id}.response.json", "w"
-                ) as response_file:
-                    json.dump(responses[plan_id], response_file)
-            LOGGER.info(responses[plan_id])
-        return responses
-
-    def create_new_resource(
-        self, endpoint: str, resource_dict: RyhtiPlanMatter | RyhtiPlanMatterPhase
-    ) -> RyhtiResponse:
-        """
-        POST new resource to Ryhti API.
-        """
-        response = requests.post(
-            endpoint,
-            json=resource_dict,
-            headers=self.xroad_headers,
-        )
-        LOGGER.info(f"Got response {response}")
-        LOGGER.info(response.text)
-        if response.status_code == 201:
-            # POST successful! The API may give warnings when saving.
-            ryhti_response = {
-                "status": 201,
-                "errors": None,
-                "warnings": response.json()["warnings"],
-                "detail": None,
-            }
-        else:
-            try:
-                # API errors always contain JSON
-                ryhti_response = response.json()
-            except json.JSONDecodeError:
-                # There is something wrong with the API
-                response.raise_for_status()
-        return cast(RyhtiResponse, ryhti_response)
-
-    def update_resource(
-        self, endpoint: str, resource_dict: RyhtiPlanMatter | RyhtiPlanMatterPhase
-    ) -> RyhtiResponse:
-        """
-        PUT resource to Ryhti API.
-        """
-        response = requests.put(
-            endpoint,
-            json=resource_dict,
-            headers=self.xroad_headers,
-        )
-        LOGGER.info(f"Got response {response}")
-        LOGGER.info(response.text)
-        if response.status_code == 200:
-            # PUT successful! The API may give warnings when saving.
-            ryhti_response = {
-                "status": 200,
-                "errors": None,
-                "warnings": response.json()["warnings"],
-                "detail": None,
-            }
-        elif response.status_code == 201:
-            # PUT successful, but the resource is weirdly reported as created. This is
-            # not in accordance of the API specification.
-            #
-            # If we really created a new resource, that is an internal implementation
-            # detail; for the API consumer, the same resource with existing UUID has
-            # been updated. Therefore, the response *should* be HTTP 200.
-            # But let's accept HTTP 201 for now:
-            ryhti_response = {
-                "status": 201,
-                "errors": None,
-                "warnings": response.json()["warnings"],
-                "detail": None,
-            }
-        else:
-            try:
-                # API errors always contain JSON
-                ryhti_response = response.json()
-            except json.JSONDecodeError:
-                # There is something wrong with the API
-                response.raise_for_status()
-        return cast(RyhtiResponse, ryhti_response)
-
-    def post_plan_matters(self) -> dict[UUID, RyhtiResponse]:
-        """
-        POST all plan matter data with permanent identifiers to Ryhti.
-
-        This means either creating a new plan matter, updating the plan matter,
-        creating a new plan matter phase, or updating the plan matter phase.
-        """
-        self.plan_matter_dictionaries = self.get_plan_matters()
-        responses: dict[UUID, RyhtiResponse] = dict()
-        for plan_id, plan_matter in self.plan_matter_dictionaries.items():
-            permanent_id = plan_matter["permanentPlanIdentifier"]
-            if not permanent_id:
-                LOGGER.info("Plan has no permanent id, cannot post plan matter.")
-                continue
-            plan_matter_endpoint = (
-                self.xroad_server_address
-                + self.xroad_api_path
-                + self.get_plan_matter_api_path(plan_matter["planType"])
-                + permanent_id
-            )
-            print(plan_matter_endpoint)
-
-            # 1) Check or create plan matter with the identifier
-            LOGGER.info(f"Checking if plan matter for plan {permanent_id} exists...")
-            get_response = requests.get(
-                plan_matter_endpoint, headers=self.xroad_headers
-            )
-            if get_response.status_code == 404:
-                LOGGER.info(f"Plan matter {permanent_id} not found! Creating...")
-                responses[plan_id] = self.create_new_resource(
-                    plan_matter_endpoint, plan_matter
-                )
-                if self.debug_json:
-                    with open(
-                        f"ryhti_debug/{permanent_id}.plan_matter_post_response.json",
-                        "w",
-                    ) as response_file:
-                        json.dump(responses[plan_id], response_file)
-                LOGGER.info(responses[plan_id])
-                continue
-            # 2) If plan matter existed, check or create plan matter phase instead
-            elif get_response.status_code == 200:
-                LOGGER.info(
-                    f"Plan matter {permanent_id} found! "
-                    "Checking if plan matter phase exists..."
-                )
-                phases: List[RyhtiPlanMatterPhase] = get_response.json()[
-                    "planMatterPhases"
-                ]
-                local_phase = plan_matter["planMatterPhases"][0]
-                local_lifecycle_status = local_phase["lifeCycleStatus"]
-                print(phases)
-                print(local_phase)
-                try:
-                    current_phase = [
-                        phase
-                        for phase in phases
-                        if phase["lifeCycleStatus"] == local_lifecycle_status
-                    ][0]
-                except IndexError:
-                    LOGGER.info(
-                        f"Phase {local_lifecycle_status} not found! Creating..."
-                    )
-                    # Create new phase with locally generated id:
-                    plan_matter_phase_endpoint = (
-                        plan_matter_endpoint
-                        + "/phase/"
-                        + local_phase["planMatterPhaseKey"]
-                    )
-                    print(plan_matter_phase_endpoint)
-                    responses[plan_id] = self.create_new_resource(
-                        plan_matter_phase_endpoint, local_phase
-                    )
-                    if self.debug_json:
-                        with open(
-                            "ryhti_debug/"
-                            + permanent_id
-                            + ".plan_matter_phase_post_response.json",
-                            "w",
-                        ) as response_file:
-                            json.dump(responses[plan_id], response_file)
-                    LOGGER.info(responses[plan_id])
-                    continue
-                # 3) If plan matter phase existed, update plan matter phase instead
-                LOGGER.info(
-                    f"Plan matter phase {current_phase['planMatterPhaseKey']} "
-                    f"with status {local_lifecycle_status} found! Updating phase..."
-                )
-                # Use existing phase id:
-                local_phase["planMatterPhaseKey"] = current_phase["planMatterPhaseKey"]
-                plan_matter_phase_endpoint = (
-                    plan_matter_endpoint
-                    + "/phase/"
-                    + current_phase["planMatterPhaseKey"]
-                )
-                responses[plan_id] = self.update_resource(
-                    plan_matter_phase_endpoint, local_phase
-                )
-                if self.debug_json:
-                    with open(
-                        "ryhti_debug/"
-                        + permanent_id
-                        + ".plan_matter_phase_put_response.json",
-                        "w",
-                    ) as response_file:
-                        json.dump(responses[plan_id], response_file)
-                LOGGER.info(responses[plan_id])
-            else:
-                try:
-                    # API errors always contain JSON
-                    responses[plan_id] = get_response.json()
-                    LOGGER.info(responses[plan_id])
-                except json.JSONDecodeError:
-                    # There is something wrong with the API
-                    get_response.raise_for_status()
-        return responses
-
     def save_plan_validation_responses(
-        self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+        self, responses: dict[UUID, "RyhtiResponse"]
+    ) -> dict[UUID, str]:
         """
         Save open validation API response data to the database and return lambda
         response.
@@ -1828,7 +1021,7 @@ class RyhtiClient:
 
         If Ryhti request fails unexpectedly, save the returned error.
         """
-        details: dict[str | UUID, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id, response in responses.items():
                 # Refetch plan from db in case it has been deleted
@@ -1865,16 +1058,9 @@ class RyhtiClient:
                 LOGGER.info(f"Ryhti response: {json.dumps(response)}")
                 plan.validated_at = datetime.datetime.now(tz=LOCAL_TZ)
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plan validations run.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
-    def set_plan_documents(self, responses: Dict[UUID, List[RyhtiResponse]]):
+    def set_plan_documents(self, responses: Dict[UUID, List["RyhtiResponse"]]):
         """
         Save uploaded plan document keys, export times and etags to the database.
         Also, append document data to the plan dictionaries.
@@ -1903,13 +1089,13 @@ class RyhtiClient:
                 session.commit()
 
     def set_permanent_plan_identifiers(
-        self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+        self, responses: dict[UUID, "RyhtiResponse"]
+    ) -> dict[UUID, str]:
         """
         Save permanent plan identifiers returned by RYHTI API to the database and
         return lambda response.
         """
-        details: dict[UUID | str, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id, response in responses.items():
                 # Make sure that the plan dict stays up to date
@@ -1917,7 +1103,7 @@ class RyhtiClient:
                 session.add(plan)
                 if response["status"] == 200:
                     plan.permanent_plan_identifier = response["detail"]
-                    details[plan_id] = response["detail"]
+                    details[plan_id] = response["detail"]  # type: ignore[assignment]
                 elif response["status"] == 401:
                     details[
                         plan_id
@@ -1925,18 +1111,11 @@ class RyhtiClient:
                 elif response["status"] == 400:
                     details[plan_id] = "Kaavalta puuttuu tuottajan kaavatunnus."
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Possible permanent plan identifiers set.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
     def save_plan_matter_validation_responses(
-        self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+        self, responses: dict[UUID, "RyhtiResponse"]
+    ) -> dict[UUID, str]:
         """
         Save X-Road validation API response data to the database and return lambda
         response.
@@ -1950,7 +1129,7 @@ class RyhtiClient:
 
         If Ryhti request fails unexpectedly, save the returned error.
         """
-        details: dict[UUID | str, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id in self.plans.keys():
                 plan: Optional[models.Plan] = session.get(models.Plan, plan_id)
@@ -1999,18 +1178,11 @@ class RyhtiClient:
                 LOGGER.info(f"Ryhti response: {json.dumps(response)}")
                 plan.validated_at = datetime.datetime.now(tz=LOCAL_TZ)
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plan matter validations run.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
+        return details
 
     def save_plan_matter_post_responses(
-        self, responses: dict[UUID, RyhtiResponse]
-    ) -> Response:
+        self, responses: dict[UUID, "RyhtiResponse"]
+    ) -> dict[UUID, str]:
         """
         Save X-Road API POST response data to the database and return lambda response.
 
@@ -2022,7 +1194,7 @@ class RyhtiClient:
 
         If Ryhti request fails unexpectedly, save the returned error.
         """
-        details: dict[UUID | str, str | None] = {}
+        details: dict[UUID, str] = {}
         with self.Session(expire_on_commit=False) as session:
             for plan_id in self.plans.keys():
                 plan: Optional[models.Plan] = session.get(models.Plan, plan_id)
@@ -2075,213 +1247,4 @@ class RyhtiClient:
                 LOGGER.info(details[plan_id])
                 LOGGER.info(f"Ryhti response: {json.dumps(response)}")
             session.commit()
-        return Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plan matters POSTed.",
-                details=details,
-                ryhti_responses=responses,
-            ),
-        )
-
-
-def responsify(
-    response: Response, using_api_gateway: bool = False
-) -> Response | AWSAPIGatewayResponse:
-    """
-    Convert response to API gateway response if the request arrived through API gateway.
-    If we want to provide status code to API gateway, the JSON body must be string.
-    """
-    return (
-        AWSAPIGatewayResponse(
-            statusCode=response["statusCode"], body=json.dumps(response["body"])
-        )
-        if using_api_gateway
-        else response
-    )
-
-
-def handler(
-    payload: Event | AWSAPIGatewayPayload, _
-) -> Response | AWSAPIGatewayResponse:
-    """
-    Handler which is called when accessing the endpoint. We must handle both API
-    gateway HTTP requests and regular lambda requests. API gateway requires
-    the response body to be stringified.
-
-    If lambda runs successfully, we always return 200 OK. In case a python
-    exception occurs, AWS lambda will return the exception.
-
-    We want to return general result message of the lambda run, as well as all the
-    Ryhti API results and errors, separated by plan id.
-    """
-    LOGGER.info(f"Received {payload}...")
-
-    using_api_gateway = False
-    # The payload may contain only the event dict *or* all possible data coming from an
-    # API Gateway HTTP request. We kinda have to infer which one is the case here.
-    try:
-        # API Gateway request. The JSON body has to be converted to python object.
-        event = cast(Event, json.loads(cast(AWSAPIGatewayPayload, payload)["body"]))
-        using_api_gateway = True
-    except KeyError:
-        # Direct lambda request
-        event = cast(Event, payload)
-
-    try:
-        event_type = Action(event["action"])
-    except KeyError:
-        event_type = Action.VALIDATE_PLANS
-    except ValueError:
-        response_title = "Unknown action."
-        LOGGER.info(response_title)
-        return responsify(
-            Response(
-                statusCode=400,
-                body=ResponseBody(
-                    title=response_title,
-                    details={event["action"]: "Unknown action."},
-                    ryhti_responses={},
-                ),
-            ),
-            using_api_gateway,
-        )
-    debug_json = event.get("save_json", False)
-    plan_uuid = event.get("plan_uuid", None)
-    if (
-        event_type is Action.GET_PERMANENT_IDENTIFIERS
-        or event_type is Action.VALIDATE_PLAN_MATTERS
-        or event_type is Action.POST_PLAN_MATTERS
-    ) and (
-        not xroad_server_address
-        or not xroad_member_code
-        or not xroad_member_client_name
-        or not xroad_syke_client_id
-        or not xroad_syke_client_secret
-    ):
-        raise ValueError(
-            (
-                "Please set your local XROAD_SERVER_ADDRESS and your organization "
-                "XROAD_MEMBER_CODE and XROAD_MEMBER_CLIENT_NAME to make API requests "
-                "to X-Road endpoints. Also, set XROAD_SYKE_CLIENT_ID and "
-                "XROAD_SYKE_CLIENT_SECRET that you have received when registering to "
-                "access SYKE X-Road API. To use production X-Road instead of test "
-                "X-road, you must also set XROAD_INSTANCE to FI. By default, it "
-                "is set to FI-TEST."
-            )
-        )
-
-    client = RyhtiClient(
-        db_helper.get_connection_string(),
-        event_type=event_type,
-        plan_uuid=plan_uuid,
-        debug_json=debug_json,
-        public_api_key=public_api_key,
-        xroad_syke_client_id=xroad_syke_client_id,
-        xroad_syke_client_secret=xroad_syke_client_secret,
-        xroad_instance=xroad_instance,
-        xroad_server_address=xroad_server_address,
-        xroad_port=xroad_port,
-        xroad_member_class=xroad_member_class,
-        xroad_member_code=xroad_member_code,
-        xroad_member_client_name=xroad_member_client_name,
-    )
-    if client.plans:
-        if event_type is Action.GET_PLANS:
-            # just return the JSON to the user
-            response_title = "Returning serialized plans from database."
-            LOGGER.info(response_title)
-            lambda_response = Response(
-                statusCode=200,
-                body=ResponseBody(
-                    title=response_title,
-                    details=cast(dict, client.plan_dictionaries),
-                    ryhti_responses={},
-                ),
-            )
-
-        if event_type is Action.GET_PLAN_MATTERS:
-            # just return the JSON to the user
-            LOGGER.info("Formatting plan matter data...")
-            plan_matters = client.get_plan_matters()
-            response_title = "Returning serialized plan matters from database."
-            LOGGER.info(response_title)
-            lambda_response = Response(
-                statusCode=200,
-                body=ResponseBody(
-                    title=response_title,
-                    details=cast(dict, plan_matters),
-                    ryhti_responses={},
-                ),
-            )
-
-        if event_type is Action.VALIDATE_PLANS:
-            # 1) Validate plans in database with public API
-            LOGGER.info("Validating plans...")
-            validation_responses = client.validate_plans()
-            # 2) Save and return plan validation data
-            LOGGER.info("Saving plan validation data...")
-            lambda_response = client.save_plan_validation_responses(
-                validation_responses
-            )
-
-        if event_type is Action.GET_PERMANENT_IDENTIFIERS:
-            LOGGER.info("Authenticating to X-road Ryhti API...")
-            client.xroad_ryhti_authenticate()
-            # 1) Check or create permanent plan identifiers, from X-Road API
-            LOGGER.info("Getting permanent plan identifiers for plans...")
-            plan_identifier_responses = client.get_permanent_plan_identifiers()
-            # 2) Save and return permanent plan identifiers
-            LOGGER.info("Setting permanent plan identifiers for plans...")
-            lambda_response = client.set_permanent_plan_identifiers(
-                plan_identifier_responses
-            )
-
-        if event_type is Action.VALIDATE_PLAN_MATTERS:
-            LOGGER.info("Authenticating to X-road Ryhti API...")
-            client.xroad_ryhti_authenticate()
-            # Documents are exported separately from plan matter. Also, they need to be
-            # present in Ryhti *before* plan matter is validated or created.
-            #
-            # Therefore, let's export all the documents right away, and update them to
-            # the latest version when needed. Otherwise, the plan matter would never be
-            # valid. Only upload documents for those plans that have permanent plan
-            # identifiers.
-            # 1) If changed documents exist, upload documents
-            LOGGER.info("Checking and updating plan documents for plans...")
-            plan_documents = client.upload_plan_documents()
-            LOGGER.info("Marking documents exported...")
-            client.set_plan_documents(plan_documents)
-            # 2) Validate plan matters with identifiers with X-Road API
-            LOGGER.info("Validating plan matters for plans...")
-            responses = client.validate_plan_matters()
-            # 3) Save and return plan matter validation data
-            LOGGER.info("Saving plan matter validation data for plans...")
-            lambda_response = client.save_plan_matter_validation_responses(responses)
-
-        if event_type is Action.POST_PLAN_MATTERS:
-            LOGGER.info("Authenticating to X-road Ryhti API...")
-            client.xroad_ryhti_authenticate()
-            # 1) If changed documents exist, upload documents
-            LOGGER.info("Checking and updating plan documents for plans...")
-            plan_documents = client.upload_plan_documents()
-            LOGGER.info("Marking documents exported...")
-            client.set_plan_documents(plan_documents)
-            # 2) Create or update Ryhti plan matters
-            LOGGER.info("POSTing plan matters...")
-            responses = client.post_plan_matters()
-            # 3) Save and return plan matter update responses
-            LOGGER.info("Saving plan matter POST data for posted plans...")
-            lambda_response = client.save_plan_matter_post_responses(responses)
-    else:
-        lambda_response = Response(
-            statusCode=200,
-            body=ResponseBody(
-                title="Plans not found, exiting.",
-                details={},
-                ryhti_responses={},
-            ),
-        )
-
-    LOGGER.info(lambda_response["body"]["title"])
-    return responsify(lambda_response, using_api_gateway)
+        return details

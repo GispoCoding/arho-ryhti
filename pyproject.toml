@@ -1,6 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ryhti_client"
+version = "0.1.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["database", "lambdas/ryhti_client/ryhti_client"]
+
 [tool.isort]
 # Black compatible values for isort https://black.readthedocs.io/en/stable/compatible_configs.html#isort
 profile = "black"
+known_first_party = ["database", "ryhti_client"]
 
 [tool.pytest.ini_options]
 pythonpath = [
@@ -9,4 +21,11 @@ pythonpath = [
 env_files = [
     ".env.test",
     ".env"
+]
+
+[tool.mypy]
+mypy_path = "./,./lambdas/ryhti_client"
+explicit_package_bases = true
+exclude = [
+  "migrations"
 ]
