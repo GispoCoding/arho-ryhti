@@ -554,11 +554,9 @@ def test_update_lifecycle_status_triggers(
 def test_add_plan_id_fkey_triggers(
     session: Session,
     plan_instance: models.Plan,
-    plan_type_instance: codes.PlanType,
     code_instance: codes.LifeCycleStatus,
     type_of_underground_instance: codes.TypeOfUnderground,
     plan_regulation_group_instance: models.PlanRegulationGroup,
-    organisation_instance: models.Organisation,
 ) -> None:
     # Add another plan instance
     another_plan_instance = models.Plan(
@@ -566,9 +564,7 @@ def test_add_plan_id_fkey_triggers(
         geom=from_shape(
             MultiPolygon([(((1.0, 2.0), (2.0, 2.0), (2.0, 1.0), (1.0, 1.0)),)])
         ),
-        plan_type=plan_type_instance,
         lifecycle_status=code_instance,
-        organisation=organisation_instance,
     )
     session.add(another_plan_instance)
 
