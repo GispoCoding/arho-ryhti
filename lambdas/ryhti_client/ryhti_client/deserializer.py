@@ -6,7 +6,6 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
-import shapely
 from geoalchemy2.shape import from_shape
 from pydantic import BaseModel, ValidationError
 from ryhti_api_client import (
@@ -28,6 +27,7 @@ from shapely import (
     MultiLineString,
     MultiPoint,
     MultiPolygon,
+    Point as ShapelyPoint,
     Polygon,
     from_geojson,
 )
@@ -184,7 +184,7 @@ class Deserializer:
         if shape.geom_type == "Polygon":
             shape = MultiPolygon([cast("Polygon", shape)])
         elif shape.geom_type == "Point":
-            shape = MultiPoint([cast("shapely.Point", shape)])
+            shape = MultiPoint([cast("ShapelyPoint", shape)])
         elif shape.geom_type == "LineString":
             shape = MultiLineString([cast("LineString", shape)])
 
