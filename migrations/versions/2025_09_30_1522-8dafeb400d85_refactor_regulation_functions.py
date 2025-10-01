@@ -1,7 +1,7 @@
 """refactor_regulation_functions
 
 Revision ID: 8dafeb400d85
-Revises: 043da5985f91
+Revises: 5556aef493f0
 Create Date: 2025-09-30 15:22:34.757310
 
 """
@@ -16,7 +16,7 @@ from sqlalchemy import text as sql_text
 
 # revision identifiers, used by Alembic.
 revision: str = "8dafeb400d85"
-down_revision: str | None = "043da5985f91"
+down_revision: str | None = "5556aef493f0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
