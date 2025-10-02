@@ -249,7 +249,7 @@ class DatabaseClient:
                 plan_recommendation, self.valid_status_value, datetimes=False
             )
         )
-        recommendation_dict["value"] = self.serialize_dict(
+        recommendation_dict["value"] = self.format_language_string_value(
             plan_recommendation.text_value
         )
         return recommendation_dict
@@ -306,14 +306,23 @@ class DatabaseClient:
 
         elif attribute_value.value_data_type is AttributeValueDataType.IDENTIFIER:
             pass  # TODO: implement identifier values
-        elif attribute_value.value_data_type in (
-            AttributeValueDataType.LOCALIZED_TEXT,
-            AttributeValueDataType.TEXT,
-        ):
+
+        elif attribute_value.value_data_type == AttributeValueDataType.LOCALIZED_TEXT:
             if attribute_value.text_value is not None:
+                value["text"] = self.format_language_string_value(
+                    attribute_value.text_value
+                )
+            if attribute_value.text_syntax is not None:
+                value["syntax"] = attribute_value.text_syntax
+
+        elif attribute_value.value_data_type == AttributeValueDataType.TEXT:
+            if isinstance(
+                attribute_value.text_value, str
+            ):  # take advantage that jsonb can contain either a "dict" or "string".
                 value["text"] = attribute_value.text_value
             if attribute_value.text_syntax is not None:
                 value["syntax"] = attribute_value.text_syntax
+
         elif attribute_value.value_data_type in (
             AttributeValueDataType.TIME_PERIOD,
             AttributeValueDataType.TIME_PERIOD_DATE_ONLY,
@@ -366,17 +375,8 @@ class DatabaseClient:
             for ai in plan_regulation.additional_information
         ]
 
-        # Return if value is None
-        if not (value := self.get_attribute_value(plan_regulation)):
-            return regulation_dict
-
-        regulation_dict["value"] = value
-
-        if "text" in value and isinstance(value["text"], dict):
-            regulation_dict["value"] = {
-                "dataType": "LocalizedText",
-                "text": self.serialize_dict(value["text"]),
-            }
+        if value := self.get_attribute_value(plan_regulation):
+            regulation_dict["value"] = value
 
         return regulation_dict
 
@@ -394,7 +394,9 @@ class DatabaseClient:
             group_dict["generalRegulationGroupKey"] = group.id
         else:
             group_dict["planRegulationGroupKey"] = group.id
-        group_dict["titleOfPlanRegulation"] = self.serialize_dict(group.name)
+        group_dict["titleOfPlanRegulation"] = self.format_language_string_value(
+            group.name
+        )
         if group.ordering is not None:
             group_dict["groupNumber"] = group.ordering
         if not general:
@@ -417,8 +419,10 @@ class DatabaseClient:
         plan_object_dict["lifeCycleStatus"] = plan_object.lifecycle_status.uri
         plan_object_dict["undergroundStatus"] = plan_object.type_of_underground.uri
         plan_object_dict["geometry"] = self.get_geojson(plan_object.geom)
-        plan_object_dict["name"] = self.serialize_dict(plan_object.name)
-        plan_object_dict["description"] = self.serialize_dict(plan_object.description)
+        plan_object_dict["name"] = self.format_language_string_value(plan_object.name)
+        plan_object_dict["description"] = self.format_language_string_value(
+            plan_object.description
+        )
         plan_object_dict["objectNumber"] = plan_object.ordering
         # we should only have one valid period. If there are several, pick last
         plan_object_dict["periodOfValidity"] = self.get_last_period(
@@ -442,24 +446,21 @@ class DatabaseClient:
 
         return plan_object_dict
 
-    def serialize_dict(
+    def format_language_string_value(
         self, field_value: dict[str, str] | None
     ) -> dict[str, str] | None:
-        """Serializes dictionary objects and returns None if dictionary is empty."""
-        if not field_value:
+        """Formats language string and returns None if empty."""
+        if not field_value or not isinstance(field_value, dict):
             return None
 
-        languages = ["fin", "swe", "smn", "sms", "sme", "eng"]
+        languages = {"fin", "swe", "smn", "sms", "sme", "eng"}
         serialized_str = {
-            key: value
-            for (key, value) in field_value.items()
-            if key in languages and field_value
+            language: name
+            for (language, name) in field_value.items()
+            if language in languages and isinstance(name, str) and name
         }
 
-        if not serialized_str:
-            return None
-
-        return serialized_str
+        return serialized_str or None
 
     def _needs_containing_land_use_area(
         self, plan_object: models.PlanObjectBase
@@ -646,7 +647,7 @@ class DatabaseClient:
         """Construct a dict of single Ryhti compatible plan map."""
         plan_map: dict[str, Any] = {}
         plan_map["planMapKey"] = document.id
-        plan_map["name"] = self.serialize_dict(document.name)
+        plan_map["name"] = self.format_language_string_value(document.name)
         plan_map["fileKey"] = (
             str(document.exported_file_key) if document.exported_file_key else None
         )
@@ -663,7 +664,7 @@ class DatabaseClient:
         attachment_document["documentIdentifier"] = (
             document.permanent_document_identifier
         )
-        attachment_document["name"] = self.serialize_dict(document.name)
+        attachment_document["name"] = self.format_language_string_value(document.name)
         attachment_document["personalDataContent"] = document.personal_data_content.uri
         attachment_document["categoryOfPublicity"] = document.category_of_publicity.uri
         attachment_document["accessibility"] = document.accessibility
@@ -682,7 +683,7 @@ class DatabaseClient:
         """Construct a dict of single Ryhti compatible other plan material item."""
         other_plan_material: dict[str, Any] = {}
         other_plan_material["otherPlanMaterialKey"] = document.id
-        other_plan_material["name"] = self.serialize_dict(document.name)
+        other_plan_material["name"] = self.format_language_string_value(document.name)
         other_plan_material["fileKey"] = (
             str(document.exported_file_key) if document.exported_file_key else None
         )
@@ -975,9 +976,7 @@ class DatabaseClient:
         plan_matter["planType"] = plan.plan_type.uri
         # For reasons unknown, name is needed for plan matter but not for plan. Plan
         # only contains description, and only in one language.
-        plan_matter["name"] = (
-            self.serialize_dict(plan.name) or plan.name
-        )  # plan_matter["name"] must not be None
+        plan_matter["name"] = plan.name
 
         # we should only have one pending period. If there are several, pick last
         dates_of_initiation = self.get_last_period(
@@ -987,7 +986,7 @@ class DatabaseClient:
             dates_of_initiation["begin"] if dates_of_initiation else None
         )
         # Hooray, unlike plan, the plan *matter* description allows multilanguage data!
-        plan_matter["description"] = self.serialize_dict(plan.description)
+        plan_matter["description"] = self.format_language_string_value(plan.description)
         plan_matter["producerPlanIdentifier"] = plan.producers_plan_identifier
         plan_matter["caseIdentifiers"] = (
             [plan.matter_management_identifier]
