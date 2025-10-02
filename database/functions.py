@@ -7,52 +7,50 @@ regulation_values = PGFunction(
     signature="regulation_values(table_name text, id uuid)",
     definition=dedent(
         """\
-        RETURNS jsonb
-        LANGUAGE plpgsql
-        COST 100
-        STABLE
-        PARALLEL SAFE
+            RETURNS jsonb
+            LANGUAGE 'plpgsql'
+            COST 100
+            STABLE PARALLEL SAFE
         AS $BODY$
         DECLARE
             return_value jsonb;
         BEGIN
             EXECUTE format(
                 $SQL$
-                WITH additional_info_grouped_by_type AS (
-                    SELECT
-                        r.id AS regulation_id,
-                        tpr.value AS regulation_type,
-                        jsonb_agg(
-                            jsonb_strip_nulls(
-                                jsonb_build_object(
-                                    'numeric_value', r.numeric_value,
-                                    'unit', r.unit,
-                                    'numeric_range_min', r.numeric_range_min,
-                                    'numeric_range_max', r.numeric_range_max,
-                                    'text_value', r.text_value,
-                                    'text_syntax', r.text_syntax,
-                                    'code_title', r.code_title,
-                                    'code_list', r.code_list,
-                                    'code_value', r.code_value
-                                )
-                            )
-                        ) AS additional_info_array
-                    FROM hame.regulation_group_association rga
-                    JOIN hame.plan_regulation_group rg
-                        ON rga.plan_regulation_group_id = rg.id
-                    JOIN hame.plan_regulation r
-                        ON rg.id = r.plan_regulation_group_id
-                    JOIN codes.type_of_plan_regulation tpr
-                        ON r.type_of_plan_regulation_id = tpr.id
-                    WHERE rga.%I = $1
-                      AND r.value_data_type IS NOT NULL
-                    GROUP BY r.id, tpr.value
-                )
-                SELECT
-                    jsonb_object_agg(regulation_type, additional_info_array)
-                FROM additional_info_grouped_by_type
+                select
+                    jsonb_object_agg(
+                        tpr.value,
+                        (
+                            select
+                                jsonb_strip_nulls(to_jsonb(ai_values))
+                            from
+                                (
+                                    select
+                                        r.numeric_value,
+                                        r.unit,
+                                        r.numeric_range_min,
+                                        r.numeric_range_max,
+                                        r.text_value,
+                                        r.text_syntax,
+                                        r.code_title,
+                                        r.code_list,
+                                        r.code_value
+                                ) as ai_values
+                        )
+                    )
+                from
+                    hame.regulation_group_association rga
+                    join hame.plan_regulation_group rg
+                        on rga.plan_regulation_group_id = rg.id
+                    join hame.plan_regulation r
+                        on rg.id = r.plan_regulation_group_id
+                    join codes.type_of_plan_regulation tpr
+                        on r.type_of_plan_regulation_id = tpr.id
+                where
+                    rga.%I = $1
+                    AND r.value_data_type is not null
                 $SQL$,
-                table_name || '_id'
+                table_name||'_id'
             )
             INTO return_value
             USING id;
