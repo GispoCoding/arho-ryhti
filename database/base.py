@@ -48,7 +48,9 @@ class VersionedBase(Base):
     # definition to work. So even if there is an id field in all the classes,
     # self-relationships will later break if id is only defined by type annotation.
     id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, server_default=func.gen_random_uuid()
+        type_=postgresql.UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
     )
     created_at: Mapped[datetime | None] = mapped_column(
         server_default=FetchedValue()
