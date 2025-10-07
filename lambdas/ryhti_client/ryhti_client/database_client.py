@@ -976,7 +976,8 @@ class DatabaseClient:
         plan_matter["planType"] = plan.plan_type.uri
         # For reasons unknown, name is needed for plan matter but not for plan. Plan
         # only contains description, and only in one language.
-        plan_matter["name"] = plan.name
+        # TODO: name should be mandatory in this stage
+        plan_matter["name"] = self.format_language_string_value(plan.name)
 
         # we should only have one pending period. If there are several, pick last
         dates_of_initiation = self.get_last_period(
